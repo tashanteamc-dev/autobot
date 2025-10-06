@@ -11,10 +11,9 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const PORT = process.env.PORT || 3000;
 const PASSWORD = "xfbest"; 
 
-// Hapus port :3000. Replit akan menggunakan URL ini untuk keep-alive.
-// GANTI DENGAN URL ASLI REPLIT ANDA (tanpa protokol dan port)
-const REPLIT_HOSTNAME = "3a27c86c-5ec8-43ae-a6d0-386b59dc3e49-00-3c2ftuor2juik.sisko.replit.dev";
-const SELF_PING_URL = `https://${REPLIT_HOSTNAME}`; 
+// Auto-detect Replit URL for keep-alive
+const REPLIT_HOSTNAME = process.env.REPLIT_DOMAINS || "localhost:3000";
+const SELF_PING_URL = `https://${REPLIT_HOSTNAME.split(',')[0]}`; 
 
 if (!BOT_TOKEN || !DATABASE_URL) {
   console.error("❌ BOT_TOKEN and DATABASE_URL are required!");
@@ -22,13 +21,28 @@ if (!BOT_TOKEN || !DATABASE_URL) {
 }
 
 // ---------- DB ----------
-const db = new Client({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+let db;
 
-db.connect()
-  .then(async () => {
+async function connectDB() {
+  if (db) {
+    try {
+      await db.end();
+    } catch {}
+  }
+  
+  db = new Client({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+
+  db.on('error', async (err) => {
+    console.error('⚠️ Database connection error:', err.message);
+    console.log('🔄 Attempting to reconnect...');
+    setTimeout(connectDB, 5000);
+  });
+
+  try {
+    await db.connect();
     await db.query(`
       CREATE TABLE IF NOT EXISTS channels (
         user_id TEXT NOT NULL,
@@ -40,17 +54,22 @@ db.connect()
       );
     `);
     console.log("✅ Database connected");
-  })
-  .catch((err) => {
-    console.error("DB error:", err.message);
-    process.exit(1);
-  });
+  } catch (err) {
+    console.error("❌ DB connection failed:", err.message);
+    console.log('🔄 Retrying in 5 seconds...');
+    setTimeout(connectDB, 5000);
+  }
+}
+
+connectDB();
 
 // ---------- Bot ----------
 const bot = new Telegraf(BOT_TOKEN);
 const userState = {};
 
-bot.telegram.getMe().then((me) => console.log("🤖 Bot started as @" + me.username));
+bot.telegram.getMe()
+  .then((me) => console.log("🤖 Bot started as @" + me.username))
+  .catch((err) => console.error("⚠️ Bot connection error:", err.message));
 
 // ---------- Helpers ----------
 async function upsertChannel(userId, channelId) {
@@ -177,7 +196,17 @@ bot.on("message", async (ctx) => {
 });
 
 // ---------- Launch ----------
-bot.launch({ polling: true }).then(() => console.log("🚀 Bot launched with polling"));
+bot.launch({ polling: true })
+  .then(() => console.log("🚀 Bot launched with polling"))
+  .catch((err) => {
+    console.error("❌ Bot launch failed:", err.message);
+    process.exit(1);
+  });
+
+// Handle bot errors to prevent crashes
+bot.catch((err, ctx) => {
+  console.error(`⚠️ Bot error for ${ctx.updateType}:`, err.message);
+});
 
 // --- PERBAIKAN: Hapus 'kill 1' dari error handler agar tidak restart paksa ---
 setInterval(() => {
